@@ -47,11 +47,11 @@ def capture_picture(cam_id=0, mirror=True, rotate=90, aspect_ratio=4.0/3.0, heig
     if "brightness" in kwargs:
         cam.set(cv2.CAP_PROP_BRIGHTNESS, kwargs["brightness"])
     
-    img_src = cv2.imread("test_img.jpg")
+    #img_src = cv2.imread("test_img.jpg")
     
     while True:
-        #ret_val, img = cam.read()
-        img = img_src[:,:]         
+        ret_val, img = cam.read()
+        #img = img_src[:,:]         
         if rotate == 90:
             img = cv2.transpose(img)
 
@@ -138,6 +138,80 @@ def blit_offset(dst, src, offset):
     
     dst[ul[0]:lr[0], ul[1]:lr[1]] = src[:, :]
 
+def convert_to_epl_string(img, offset_x_pix, offset_y_pix):
+    """
+    Syntax GWp1,p2,p3,p4,DATA
+    Parameters This table identifies the parameters for this format:
+    Parameters Details
+    p1 = Horizontal start
+    position
+    Horizontal start position (X) in dots.
+    p2 = Vertical start position Vertical start position (Y) in dots.
+    p3 = Width of graphic Width of graphic in bytes. Eight (8) dots = one (1) byte of
+    data.
+    p4 = Length of graphic Length of graphic in dots (or print lines)
+    DATA Raw binary data without graphic file formatting. Data must
+    be in bytes. Multiply the width in bytes (p3) by the number of
+    print lines (p4) for the total amount of graphic data. The
+    printer automatically calculates the exact size of the data
+    block based upon this formula.
+    """
+    num_bytes_per_line = img.shape[1] / 8
+    num_lines = img.shape[0]
+
+    data_bytes = np.zeros((num_bytes_per_line * num_lines,), dtype=np.uint8)    
+    print data_bytes.shape
+    for y in xrange(num_lines):
+        for byte_idx in xrange(num_bytes_per_line):
+            x = byte_idx * 8
+            byte =  0x80 if (img[y, x + 0] > 128) else 0x00
+            byte |= 0x40 if (img[y, x + 1] > 128) else 0x00
+            byte |= 0x20 if (img[y, x + 2] > 128) else 0x00
+            byte |= 0x10 if (img[y, x + 3] > 128) else 0x00
+            byte |= 0x08 if (img[y, x + 4] > 128) else 0x00
+            byte |= 0x04 if (img[y, x + 5] > 128) else 0x00
+            byte |= 0x02 if (img[y, x + 6] > 128) else 0x00
+            byte |= 0x01 if (img[y, x + 7] > 128) else 0x00
+            
+            data_bytes[y * num_bytes_per_line + byte_idx] = byte
+    
+    epl_cmd = "GW%d,%d,%d,%d,%s\r\n" % (offset_x_pix, offset_y_pix, num_bytes_per_line, num_lines, "".join([chr(b) for b in data_bytes]))
+    
+    return epl_cmd
+
+def generate_epl_file(img, filename, **kwargs):
+    print_data = { "label_length_pix": 1218, "label_width_pix": 831, "gap_length_pix": 24,
+                  "speed_idx":1, "darkness": 4, "ref_x_pix": 9, "ref_y_pix": 0}
+    
+    print_data.update(kwargs)
+    print_data["image_data"] = convert_to_epl_string(img, 0, 0)
+    template_header = """    
+I8,A,001
+
+
+Q%(label_length_pix)d,%(gap_length_pix)03d
+q%(label_width_pix)d
+rN
+S%(speed_idx)d
+D%(darkness)d
+ZT
+JF
+O
+R%(ref_x_pix)d,%(ref_y_pix)d
+f100
+
+N
+"""
+    template_footer = """
+P1
+"""
+
+    with open(filename, "wb+") as fout:
+        fout.write(template_header % print_data)
+        fout.write(print_data["image_data"])
+        fout.write(template_footer % print_data)
+    
+
 class ZolaroidProcessor(object):
     def __init__(self, source, paper_width_in=4.0, paper_height_in=6.0,
                  frame_width_in=FRAME_WIDTH_IN, frame_height_in=FRAME_HEIGHT_IN,
@@ -172,22 +246,25 @@ class ZolaroidProcessor(object):
             
             blit_centered(img, background)
 
-        while True:
-            gray = cv2.cvtColor(self._source, cv2.COLOR_BGR2GRAY)
-            lightened = cv2.multiply(gray, np.array([1.2]))
-            resized = cv2.resize(lightened, (self._frame_width_pix, self._frame_height_pix))
-            blit_offset(img, resized, (self._frame_off_x_pix, self._frame_off_y_pix))
-            dithered = dither_floyd_steinberg(img)
-            
-            #preview_img = cv2.resize(img, (image_width / 2, image_height / 2))
-            preview_img = dithered
-            
-            cv2.imshow('Frame preview. Press <SPACE> to end', preview_img)
-            # Space to end
-            if cv2.waitKey(1) == 32: 
-                break
+        
+        gray = cv2.cvtColor(self._source, cv2.COLOR_BGR2GRAY)
+        lightened = cv2.multiply(gray, np.array([1.2]))
+        resized = cv2.resize(lightened, (self._frame_width_pix, self._frame_height_pix))
+        blit_offset(img, resized, (self._frame_off_x_pix, self._frame_off_y_pix))
+        dithered = dither_floyd_steinberg(img)
+        print dithered.shape
+        
+        #preview_img = cv2.resize(img, (image_width / 2, image_height / 2))
+        preview_img = cv2.resize(dithered, (dithered.shape[1] / 2, dithered.shape[0] / 2))
+        
+        cv2.imshow('Frame preview. Press <SPACE> to end', preview_img)
+        # Space to end
+        cv2.waitKey(0)
+        
+        #print convert_to_epl_string(dithered, 0, 0)
             
         cv2.destroyAllWindows()
+        generate_epl_file(dithered, "test1.prn")
     
 def main():
     captured = capture_picture(cam_id=1, mirror=True, aspect_ratio=FRAME_WIDTH_IN/FRAME_HEIGHT_IN,
