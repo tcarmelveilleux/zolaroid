@@ -125,16 +125,6 @@ class PictureCapture(object):
         return captured
 
 
-def sat_add(a, b):
-    the_sum = a + b
-    if the_sum > 255:
-        return 255
-    elif the_sum < 0:
-        return 0
-    else:
-        return the_sum
-
-
 def dither_floyd_steinberg(img):
     # Adapted from
     # https://en.wikipedia.org/wiki/Floyd-Steinberg_dithering
@@ -145,12 +135,15 @@ def dither_floyd_steinberg(img):
     new_img = img[:, :]
         
     for y in xrange(height):
+        if (y % 10) == 0:
+            print("Floyd steinberg %d%%" % (y * 100 / height))
+            
         for x in xrange(width):
             if new_img[y, x] > 127:
-                err = np.uint8(new_img[y, x]) - 255 + random.randint(-10, 10)
+                err = np.uint8(new_img[y, x]) - 255
                 new_img[y, x] = 255
             else:
-                err = np.uint8(new_img[y, x]) - 0 + random.randint(-10, 10)
+                err = np.uint8(new_img[y, x]) - 0
                 new_img[y, x] = 0
 
             a = (err * 7) / 16
@@ -159,12 +152,22 @@ def dither_floyd_steinberg(img):
             d = (err * 3) / 16
               
             if (y != (height - 1)) and (x != 0) and (x != (width - 1)):
-                new_img[y  ,x+1] = sat_add(new_img[y  ,x+1], a)
-                new_img[y+1,x+1] = sat_add(new_img[y+1,x+1], b)
-                new_img[y+1,x  ] = sat_add(new_img[y+1,x  ], c)
-                new_img[y+1,x-1] = sat_add(new_img[y+1,x-1], d)
+                w = new_img[y  ,x+1] + a
+                w = 255 if w > 255 else (0 if w < 0 else w)
+                new_img[y  ,x+1] = w
+                
+                w = new_img[y+1,x+1] + b
+                w = 255 if w > 255 else (0 if w < 0 else w)
+                new_img[y+1,x+1] = w
+                
+                w = new_img[y+1,x  ] + c
+                w = 255 if w > 255 else (0 if w < 0 else w)
+                new_img[y+1,x  ] = w
+                
+                w = new_img[y+1,x-1] + d
+                w = 255 if w > 255 else (0 if w < 0 else w)
+                new_img[y+1,x-1] = w
             
-    
     return new_img
 
 
@@ -348,6 +351,13 @@ class ZolaroidProcessor(object):
         # TODO: Support ZPL
         generate_epl_file(dithered, filename, **kwargs)
         print "Done saving result"
+        
+        if "printer" in kwargs:
+            with open(filename, "rb") as infile:
+                with open(kwargs["printer"], "wb") as printer:
+                    data = infile.read()
+                    printer.write(data)
+                    print "Done printing" 
 
     
 class Controller(object):
@@ -376,7 +386,8 @@ def main():
             BETA_AXIS: {"name": "beta", "centered": False},
             PLAY_AXIS:{"name": "button_play", "centered": False, "button_down_only": True}
         }
-        midi_port = None # Default
+        # midi_port = None # Default
+        midi_port = "nanoKONTROL2:nanoKONTROL2 MIDI 1 20:0"
         midi_driver = MidiControllerDriver(midi_port, 0, controller.handle_event, axes_configs)
         print "MIDI Support Enabled!"
     else:
@@ -397,7 +408,7 @@ def main():
     controller.remove_observer(processor)
 
     # Print
-    processor.print_image(filename="out.prn", format="epl", ref_x_pix=int(0.25*203))
+    processor.print_image(filename="out.prn", format="epl", ref_x_pix=int(0.25*203), printer="/dev/usb/lp0")
     
     # Clean-up
     if midi_driver is not None:
