@@ -29,6 +29,10 @@ def test_midi(portname):
         pass
 
 
+def get_midi_devices_list():
+    return list(mido.get_input_names())
+
+
 class MidiControllerDriver(object):
     """
     Uses Mido to read events

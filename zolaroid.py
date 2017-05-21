@@ -10,23 +10,30 @@ Created on Fri Apr 07 19:59:58 2017
 Copyright 2017, Tennessee Carmel-Veilleux.
 https://github.com/tcarmelveilleux/zolaroid
 """
-
+from __future__ import print_function
+import os
+import sys
 import cv2
 import threading
 import numpy as np
-import random
+import argparse
+import tempfile
 
 try:
-    from midi_driver import MidiControllerDriver
+    from midi_driver import MidiControllerDriver, get_midi_devices_list
     MIDI_SUPPORT = True
 except:
     MIDI_SUPPORT = False
+
+DEFAULT_WIDTH = 4.0
+DEFAULT_HEIGHT = 6.0
+DEFAULT_DPI = 203
 
 FRAME_OFF_X_IN = 0.54
 FRAME_OFF_Y_IN = 0.65
 FRAME_WIDTH_IN = 2.75
 FRAME_HEIGHT_IN = 4.6
-FRAME_DPI = 203
+FRAME_DPI = DEFAULT_DPI
 FRAME_MIN_MARGIN_IN = 0.08
 
 PLAY_AXIS = 41
@@ -35,6 +42,9 @@ BETA_AXIS = 17
 BRIGHTNESS_AXIS = ALPHA_AXIS
 EXPOSURE_AXIS = BETA_AXIS
 
+RETCODE_BAD_ARG = 1
+RETCODE_FILE_NOT_FOUND = 2
+RETCODE_PARSE_ERROR = 3
 
 def viewfinder_bounds(img, height_ratio, aspect_ratio):
     im_height, im_width, _ = img.shape
@@ -65,10 +75,10 @@ class PictureCapture(object):
                     self._done = True
                 elif event["control"] == BRIGHTNESS_AXIS:
                     self._brightness = 60 + int(event["value"] * 240)
-                    print "Set brightness to %d" % self._brightness
+                    print("Set brightness to %d" % self._brightness)
                 elif event["control"] == EXPOSURE_AXIS:
                     self._exposure = -6 + int((event["value"] * 7.0) + 0.001)
-                    print "Set exposure to %d" % self._exposure
+                    print("Set exposure to %d" % self._exposure)
         
     def capture(self, cam_id=0, mirror=True, rotate=90, aspect_ratio=4.0/3.0, height_ratio=0.5, **kwargs):
         cam = cv2.VideoCapture(cam_id)
@@ -140,10 +150,10 @@ def dither_floyd_steinberg(img):
             
         for x in xrange(width):
             if new_img[y, x] > 127:
-                err = np.uint8(new_img[y, x]) - 255
+                err = new_img[y, x] - 255
                 new_img[y, x] = 255
             else:
-                err = np.uint8(new_img[y, x]) - 0
+                err = np.uint8(new_img[y, x] - 0)
                 new_img[y, x] = 0
 
             a = (err * 7) / 16
@@ -168,6 +178,28 @@ def dither_floyd_steinberg(img):
                 w = 255 if w > 255 else (0 if w < 0 else w)
                 new_img[y+1,x-1] = w
             
+    return new_img
+
+
+def dither_ordered(img):
+    dith_mat = np.array([[0, 8, 2, 10],[12, 4, 14, 6],[3,11,1,9],[15,7,13,5]], dtype='uint8') * 16
+    width = img.shape[1]
+    height = img.shape[0]
+    new_img = img[:, :]
+
+    for y in xrange(height):
+        if (y % 10) == 0:
+            print("Ordered dither %d%%" % (y * 100 / height))
+
+        for x in xrange(width):
+            #if new_img[y, x] > 127:
+            #    err = 255 - new_img[y, x]
+            #else:
+            #    err = new_img[y, x] - 0
+            #
+            #err = np.uint8(255 if err > 255 else (0 if err < 0 else err))
+            new_img[y, x] = 255 if (new_img[y, x] >= dith_mat[y&3, x&3]) else 0
+
     return new_img
 
 
@@ -234,7 +266,7 @@ def convert_to_epl_string(img, offset_x_pix, offset_y_pix):
     return epl_cmd
 
 
-def generate_epl_file(img, filename, **kwargs):
+def generate_epl_file(img, image_file, **kwargs):
     print_data = { "label_length_pix": 1218, "label_width_pix": 831, "gap_length_pix": 24,
                   "speed_idx":1, "darkness": 4, "ref_x_pix": 0, "ref_y_pix": 0}
     
@@ -260,10 +292,9 @@ N
     template_footer = """
 P1
 """
-    with open(filename, "wb+") as fout:
-        fout.write(template_header % print_data)
-        fout.write(print_data["image_data"])
-        fout.write(template_footer % print_data)
+    image_file.write(template_header % print_data)
+    image_file.write(print_data["image_data"])
+    image_file.write(template_footer % print_data)
     
 
 class ZolaroidProcessor(object):
@@ -299,10 +330,10 @@ class ZolaroidProcessor(object):
                     self._done = True
                 elif event["control"] == ALPHA_AXIS:
                     self._alpha = 0.5 + (event["value"] * (5.0 - 0.5))
-                    print "Set alpha to %.3f" % self._alpha
+                    print("Set alpha to %.3f" % self._alpha)
                 elif event["control"] == BETA_AXIS:
                     self._beta = 0.0 + event["value"] * 100.0
-                    print "Set beta to %.3f" % self._beta
+                    print("Set beta to %.3f" % self._beta)
         
     def process_until_done(self):
         image_width = self._paper_width_pix - int(2.0 * FRAME_MIN_MARGIN_IN * self._printer_dpi)
@@ -329,7 +360,6 @@ class ZolaroidProcessor(object):
             cv2.convertScaleAbs(gray, adjusted, alpha, beta)
             resized = cv2.resize(adjusted, (self._frame_width_pix, self._frame_height_pix))
             blit_offset(img, resized, (self._frame_off_x_pix, self._frame_off_y_pix))
-            #dithered = dither_floyd_steinberg(img)
             
             preview_img = cv2.resize(img, (image_width / 2, image_height / 2))
             
@@ -345,21 +375,43 @@ class ZolaroidProcessor(object):
             
         cv2.destroyAllWindows()
         
-    def print_image(self, filename, format="epl", **kwargs):
-        print "Saving result image to %s (will take a while)" % filename
-        dithered = dither_floyd_steinberg(self._result_image)
-        # TODO: Support ZPL
-        generate_epl_file(dithered, filename, **kwargs)
-        print "Done saving result"
-        
-        if "printer" in kwargs:
-            with open(filename, "rb") as infile:
-                with open(kwargs["printer"], "wb") as printer:
-                    data = infile.read()
-                    printer.write(data)
-                    print "Done printing" 
+    def print_image(self, filename=None, image_type="epl", use_floyd_steinberg=False, **kwargs):
+        print("Saving result image to %s (will take a while)" % filename)
 
-    
+        if use_floyd_steinberg:
+            dithered = dither_floyd_steinberg(self._result_image)
+        else:
+            dithered = dither_ordered(self._result_image)
+
+        # TODO: Support ZPL
+        if filename is None:
+            output_file = tempfile.NamedTemporaryFile(delete=False)
+            output_filename = output_file.name
+        else:
+            output_file = open(filename, "wb+")
+            output_filename = filename
+
+        with output_file:
+            generate_epl_file(dithered, output_file, **kwargs)
+            print("Done saving result")
+        
+        if kwargs.get("printer") is not None:
+            try:
+                if sys.platform == "win32":
+                    # On win32, use the COPY /B command to print directly to a raw port. Somehow,
+                    # I could not make normal IO work (as the case below), which works under Linux
+                    os.system("COPY /B %s %s" % (output_filename, kwargs["printer"]))
+                else:
+                    # On non-windows, simply dump the data to the printer spool path
+                    with open(output_filename, "rb") as infile:
+                        with open(kwargs["printer"], "wb+") as printer:
+                            data = infile.read()
+                            printer.write(data)
+                print("Done printing")
+            except IOError as e:
+                print("Error while trying to print: %s", str(e))
+
+
 class Controller(object):
     def __init__(self):
         self._observers = set()
@@ -374,30 +426,77 @@ class Controller(object):
     def handle_event(self, event):
         for observer in self._observers:
             observer.handle_event(event)
-    
-        
+
+
+def print_and_die(message, retcode):
+    print(message, file=sys.stderr)
+    sys.exit(retcode)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', '--printer', metavar="PATH_TO_PRINTER", action="store", help='Path for printer which will output')
+    parser.add_argument('-o', '--output', metavar="FILENAME", action="store", help='Path where to save output file')
+    parser.add_argument('-t', '--type', metavar="FORMAT", action="store", default="epl", help='Printer type, one of ["zpl", "epl"]')
+    parser.add_argument('-l', '--list', action="store_true", help='List MIDI devices and exit')
+    parser.add_argument('-n', '--midi-name', action="store", help='Full name of MIDI input device or "default" for default')
+    parser.add_argument('-m', '--midi-config', metavar="JSON_FILENAME", action="store", help='Load MIDI config from given JSON (otherwise, default to KORG NanoKontrol2)')
+    parser.add_argument('-c', '--camera', metavar="CAMERA_NUM", action="store", default=0, type=int, help='Set camera number to use (default: 0)')
+    parser.add_argument('-s', '--floyd-steinberg', action="store_true", default=False, help='Use Floyd-Steinberg dithering instead of ordered dithering')
+    parser.add_argument('-W', '--width', metavar="WIDTH_INCHES", action="store", type=float,
+                        default=DEFAULT_WIDTH, help='Set label width in inches (default:%.1f)' % DEFAULT_WIDTH)
+    parser.add_argument('-H', '--height', metavar="HEIGHT_INCHES", action="store", type=float,
+                        default=DEFAULT_WIDTH, help='Set label height in inches (default:%.1f)' % DEFAULT_HEIGHT)
+    parser.add_argument('-d', '--dpi', metavar="DPI", action="store", type=int,
+                        default=FRAME_DPI, help='Set printer DPI (default:%d)' % FRAME_DPI)
+
+    # TODO: Add background config
+    # TODO: Add MIDI input as index
+    # TODO: Add MIDI test mode hook from midi_driver.py
+
+    args = parser.parse_args()
+
+    # Handle listing MIDI devices
+    if args.list and MIDI_SUPPORT:
+        print("MIDI Input devices:")
+        for idx, midi_port in enumerate(get_midi_devices_list()):
+            print("  * %d: '%s'" % idx, midi_port)
+        sys.exit(0)
+
+    # Make sure at least one output action is provided
+    if not args.printer and not args.output:
+        parser.print_usage(file=sys.stderr)
+        print_and_die("Need at least one of -p/--printer or -o/--output!", RETCODE_BAD_ARG)
+
+    return args
+
 def main():
+    args = parse_args()
+
     # Init MIDI driver    
     controller = Controller()
     
-    if MIDI_SUPPORT:
+    if MIDI_SUPPORT and args.midi_name is not None:
         axes_configs = {
             ALPHA_AXIS: {"name": "alpha", "centered": False},
             BETA_AXIS: {"name": "beta", "centered": False},
             PLAY_AXIS:{"name": "button_play", "centered": False, "button_down_only": True}
         }
-        # midi_port = None # Default
-        midi_port = "nanoKONTROL2:nanoKONTROL2 MIDI 1 20:0"
+
+        if args.midi_name == "default":
+            midi_port = None
+        else:
+            midi_port = args.midi_name #"nanoKONTROL2:nanoKONTROL2 MIDI 1 20:0"
         midi_driver = MidiControllerDriver(midi_port, 0, controller.handle_event, axes_configs)
-        print "MIDI Support Enabled!"
+        print("MIDI Support Enabled!")
     else:
         midi_driver = None
-        print "NO MIDI Support!"
+        print("NO MIDI Support!")
 
     # Capture picture from webcam
     pic_capture = PictureCapture()
     controller.add_observer(pic_capture)
-    captured = pic_capture.capture(cam_id=0, mirror=True, aspect_ratio=FRAME_WIDTH_IN/FRAME_HEIGHT_IN, height_ratio=0.9)
+    captured = pic_capture.capture(cam_id=args.camera, mirror=True, aspect_ratio=FRAME_WIDTH_IN/FRAME_HEIGHT_IN, height_ratio=0.9)
     controller.remove_observer(pic_capture)
     
     # Adjust
@@ -408,7 +507,8 @@ def main():
     controller.remove_observer(processor)
 
     # Print
-    processor.print_image(filename="out.prn", format="epl", ref_x_pix=int(0.25*203), printer="/dev/usb/lp0")
+    processor.print_image(filename=args.output, image_type=args.type, use_floyd_steinberg=args.floyd_steinberg,
+                          ref_x_pix=int(0.25*203), printer=args.printer)
     
     # Clean-up
     if midi_driver is not None:
