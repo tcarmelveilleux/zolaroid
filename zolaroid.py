@@ -145,8 +145,9 @@ def dither_floyd_steinberg(img):
     new_img = img[:, :]
         
     for y in xrange(height):
-        if (y % 10) == 0:
-            print("Floyd steinberg %d%%" % (y * 100 / height))
+        # Print progress once in a while
+        if (y % 50) == 0 or y == (height - 1):
+            print("Floyd steinberg %d%%" % (y * 100 / (height - 1)))
             
         for x in xrange(width):
             if new_img[y, x] > 127:
@@ -188,16 +189,11 @@ def dither_ordered(img):
     new_img = img[:, :]
 
     for y in xrange(height):
-        if (y % 10) == 0:
-            print("Ordered dither %d%%" % (y * 100 / height))
+        # Print progress once in a while
+        if (y % 50) == 0 or (y == (height - 1)):
+            print("Ordered dither %d%%" % (y * 100 / (height - 1)))
 
         for x in xrange(width):
-            #if new_img[y, x] > 127:
-            #    err = 255 - new_img[y, x]
-            #else:
-            #    err = new_img[y, x] - 0
-            #
-            #err = np.uint8(255 if err > 255 else (0 if err < 0 else err))
             new_img[y, x] = 255 if (new_img[y, x] >= dith_mat[y&3, x&3]) else 0
 
     return new_img
