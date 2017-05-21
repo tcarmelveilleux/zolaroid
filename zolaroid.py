@@ -435,7 +435,8 @@ def parse_args():
     parser.add_argument('-o', '--output', metavar="FILENAME", action="store", help='Path where to save output file')
     parser.add_argument('-t', '--type', metavar="FORMAT", action="store", default="epl", help='Printer type, one of ["zpl", "epl"]')
     parser.add_argument('-l', '--list', action="store_true", help='List MIDI devices and exit')
-    parser.add_argument('-n', '--midi-name', action="store", help='Full name of MIDI input device or "default" for default')
+    parser.add_argument('-n', '--midi-name', metavar="MIDI_NAME", action="store", help='Full name of MIDI input device or "default" for default')
+    parser.add_argument('-N', '--midi-num', metavar="MIDI_NUM", action="store", type=int, help='Index of MIDI input device obtained from -l/--list')
     parser.add_argument('-m', '--midi-config', metavar="JSON_FILENAME", action="store", help='Load MIDI config from given JSON (otherwise, default to KORG NanoKontrol2)')
     parser.add_argument('-c', '--camera', metavar="CAMERA_NUM", action="store", default=0, type=int, help='Set camera number to use (default: 0)')
     parser.add_argument('-s', '--floyd-steinberg', action="store_true", default=False, help='Use Floyd-Steinberg dithering instead of ordered dithering')
@@ -447,7 +448,6 @@ def parse_args():
                         default=FRAME_DPI, help='Set printer DPI (default:%d)' % FRAME_DPI)
 
     # TODO: Add background config
-    # TODO: Add MIDI input as index
     # TODO: Add MIDI test mode hook from midi_driver.py
 
     args = parser.parse_args()
@@ -456,7 +456,7 @@ def parse_args():
     if args.list and MIDI_SUPPORT:
         print("MIDI Input devices:")
         for idx, midi_port in enumerate(get_midi_devices_list()):
-            print("  * %d: '%s'" % idx, midi_port)
+            print("  * %d: '%s'" % (idx, midi_port))
         sys.exit(0)
 
     # Make sure at least one output action is provided
@@ -471,22 +471,41 @@ def main():
 
     # Init MIDI driver    
     controller = Controller()
-    
-    if MIDI_SUPPORT and args.midi_name is not None:
+    midi_driver = None
+
+    if MIDI_SUPPORT:
+        midi_port = args.midi_name
+        if midi_port is None and args.midi_num is not None:
+            midi_devices = []
+            for midi_port in get_midi_devices_list():
+                midi_devices.append(midi_port)
+
+            if len(midi_devices) == 0:
+                print("WARNING: No midi devices found!")
+                midi_port = None
+            elif args.midi_num >= len(midi_devices):
+                print("WARNING: Not using MIDI device number provide (%d), it is not valid!")
+                midi_port = None
+            else:
+                midi_port = midi_devices[args.midi_num]
+                print("Using midi device number %d '%s'" % (args.midi_num, midi_port))
+
+        if args.midi_name == "default":
+            midi_port = None
+
+        # TODO: Load config for axes from JSON
         axes_configs = {
             ALPHA_AXIS: {"name": "alpha", "centered": False},
             BETA_AXIS: {"name": "beta", "centered": False},
             PLAY_AXIS:{"name": "button_play", "centered": False, "button_down_only": True}
         }
 
-        if args.midi_name == "default":
-            midi_port = None
-        else:
-            midi_port = args.midi_name #"nanoKONTROL2:nanoKONTROL2 MIDI 1 20:0"
-        midi_driver = MidiControllerDriver(midi_port, 0, controller.handle_event, axes_configs)
-        print("MIDI Support Enabled!")
+        try:
+            midi_driver = MidiControllerDriver(midi_port, 0, controller.handle_event, axes_configs)
+            print("MIDI Support Enabled!")
+        except BaseException as e:
+            print("WARNING: Exception trying to enable MIDI support (%s). Disabling!" % str(e))
     else:
-        midi_driver = None
         print("NO MIDI Support!")
 
     # Capture picture from webcam
@@ -497,14 +516,16 @@ def main():
     
     # Adjust
     processor = ZolaroidProcessor(source=captured, background="backgrounds/frame1.png",
-                                  frame_off_x_in=FRAME_OFF_X_IN, frame_off_y_in=FRAME_OFF_Y_IN)
+                                  frame_off_x_in=FRAME_OFF_X_IN, frame_off_y_in=FRAME_OFF_Y_IN,
+                                  printer_dpi=args.dpi)
     controller.add_observer(processor)
     processor.process_until_done()
     controller.remove_observer(processor)
 
     # Print
+    # FIXME: Remove hardcoded X offset
     processor.print_image(filename=args.output, image_type=args.type, use_floyd_steinberg=args.floyd_steinberg,
-                          ref_x_pix=int(0.25*203), printer=args.printer)
+                          ref_x_pix=int(0.25 * args.dpi), printer=args.printer)
     
     # Clean-up
     if midi_driver is not None:
