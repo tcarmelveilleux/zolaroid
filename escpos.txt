@@ -1,0 +1,38 @@
+* Reset
+ESC @
+
+* Enter page mode
+https://reference.epson-biz.com/modules/ref_escpos/index.php?content_id=193
+ESC L
+
+* Select print direction
+https://reference.epson-biz.com/modules/ref_escpos/index.php?content_id=55
+ESC T
+: ESC 'T' '0' -> Left to right from upper left
+
+* Select print area 
+HEX: 1B 57 xL xH yL yH dxL dxH dyL dyH
+
+x: 0
+y: 0
+dx: 512
+dy: 1662 max, 768.0 for "4x6", else 682 for "4:3"
+
+* Select Unidirectional mode
+ESC U 1
+HEX: 1B 55 01/31
+
+* Bitmap
+For each 24 lines. MSB1 is first line, LSB1 is 8th line, MSB2 ist 9th line, LSB2 is 16th line, etc
+HEX: 1B 2A 21 wL wH ..........
+wL/wH are width low/high byte
+
+* Print data
+ESC FF
+
+* Cut paper:
+"GS V <function A>" -> "GS(0x1D) V 0" -> full cut. GS V 1 partial 
+HEX: 1D 56 m -> 0x1D 0x56 0x00
+
+
+

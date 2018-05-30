@@ -29,10 +29,16 @@ DEFAULT_WIDTH = 4.0
 DEFAULT_HEIGHT = 6.0
 DEFAULT_DPI = 203
 
-FRAME_OFF_X_IN = 0.54
-FRAME_OFF_Y_IN = 0.65
-FRAME_WIDTH_IN = 2.75
-FRAME_HEIGHT_IN = 4.6
+#FRAME_OFF_X_IN = 0.54
+#FRAME_OFF_Y_IN = 0.65
+#FRAME_WIDTH_IN = 2.75
+#FRAME_HEIGHT_IN = 4.6
+
+FRAME_OFF_X_IN = 0.0
+FRAME_OFF_Y_IN = 0.0
+FRAME_WIDTH_IN = 2.0
+FRAME_HEIGHT_IN = 4.0
+
 FRAME_DPI = DEFAULT_DPI
 FRAME_MIN_MARGIN_IN = 0.08
 
@@ -114,13 +120,16 @@ class PictureCapture(object):
             # Extract a rectangle that has ratio `max_dim` of the height and is sized
             # according to `aspect_ratio`
             cap_width, cap_height, ul, br = viewfinder_bounds(img, height_ratio, aspect_ratio)
+            ul = (0, 0)
             captured = extract_rectangle(img, ul, br)
         
             # Preview is always max 480 pixels to fit the screen easy
             preview_height = 600
             preview_width = int(preview_height * aspect_ratio)
             preview_img = cv2.resize(captured, (preview_width, preview_height))
-            
+            print(cap_width, cap_height, ul, br, preview_width, preview_height, aspect_ratio, captured.shape)
+
+
             cv2.imshow('Capture. <SPACE>/PLAY to take grab', preview_img)
             
             # Space or PLAY midi button to capture
@@ -291,7 +300,81 @@ P1
     image_file.write(template_header % print_data)
     image_file.write(print_data["image_data"])
     image_file.write(template_footer % print_data)
-    
+
+
+def convert_to_esc_pos_sequence(img, stride_line_bytes=3):
+    """
+    ESC * command, in double-density mode
+
+    For each block of 24 lines. MSB1 is first line, LSB1 is 8th line, MSB2 ist 9th line, LSB2 is 16th line, etc
+    HEX: 1B 2A 21 wL wH ..........
+    wL/wH are width low/high byte
+    """
+
+    width = img.shape[1]
+    height = img.shape[0]
+
+    print("Converting %dx%d" % (width, height))
+    # Need multiple of 24 lines as bunches of 3 bytes, width is arbitrary
+    graphics_data = bytearray(width * ((height + ((8 * stride_line_bytes) - 1)) // (8 * stride_line_bytes) * 3))
+
+    for y in xrange(height):
+        for x in xrange(width):
+            byte_idx = (((y // (8 * stride_line_bytes)) * stride_line_bytes) * width) + (x * stride_line_bytes) + ((y % (8 * stride_line_bytes)) // 8)
+            mask = 0x80 >> (y & 7)
+            graphics_data[byte_idx] |= mask if (img[y, x] < 128) else 0
+
+    wl = width & 0xFF
+    wh = (width >> 8) & 0xff
+
+    commands = []
+    for y_block in range((height + ((8 * stride_line_bytes) - 1)) // (8 * stride_line_bytes)):
+        start_byte = (y_block * stride_line_bytes * width)
+        num_bytes = width * stride_line_bytes
+        mode = 33
+        stride = graphics_data[start_byte:start_byte+num_bytes]
+        commands.append("\x1B\x2A%s%s%s%s" % (chr(mode), chr(wl), chr(wh), str(stride)))
+
+    return "".join(commands)
+
+
+def generate_escpos_file(img, image_file, **kwargs):
+    print_data = {"label_length_pix": 720, "label_width_pix": 360, "ref_x_pix": 0, "ref_y_pix": 0}
+
+    print_data.update(kwargs)
+    print_data["image_data"] = convert_to_esc_pos_sequence(img)
+
+    xl = chr(print_data["ref_x_pix"] & 0xff)
+    xh = chr((print_data["ref_x_pix"] >> 8) & 0xff)
+
+    yl = chr(print_data["ref_y_pix"] & 0xff)
+    yh = chr((print_data["ref_y_pix"] >> 8) & 0xff)
+
+    dxl = chr(print_data["label_width_pix"] & 0xff)
+    dxh = chr((print_data["label_width_pix"] >> 8) & 0xff)
+
+    dyl = chr(print_data["label_length_pix"] & 0xff)
+    dyh = chr((print_data["label_length_pix"] >> 8) & 0xff)
+
+    # Reset (ESC @), Enter Page Mode (ESC L), Set top-left, left-to-right print direction (ESC T 0)
+    template_header = "\x1B@\x1BL\x1BT0"
+    # Set line spacing 24 dots (ESC '3' n)
+    spacing = 24
+    template_header += "\x1B3%s" % (chr(spacing))
+
+    # Select page mode print area (ESC W)
+    template_header += "\x1BW%s%s%s%s%s%s%s%s" % (xl, xh, yl, yh, dxl, dxh, dyl, dyh)
+
+    # Select unidirectional mode (ESC U 1)
+    template_header += "\x1BU%s" % (chr(1))
+
+    # Footer: Print data (ESC FF), Reset (ESC @), Feed some, Cut paper (GS V 0), Reset (ESC @)
+    template_footer = "\x1B\x0C\x1B@\n\n\n\n\n\n\x1DV0\x1B@"
+
+    image_file.write(template_header)
+    image_file.write(print_data["image_data"])
+    image_file.write(template_footer)
+
 
 class ZolaroidProcessor(object):
     def __init__(self, source, paper_width_in=4.0, paper_height_in=6.0,
@@ -314,7 +397,7 @@ class ZolaroidProcessor(object):
 
         self._lock = threading.Lock()
         self._done = False
-        self._alpha = kwargs.get("alpha", 1.0)
+        self._alpha = kwargs.get("alpha", 2.0)
         self._beta = kwargs.get("beta", 0.0)
         
         self._result_image = None
@@ -332,6 +415,7 @@ class ZolaroidProcessor(object):
                     print("Set beta to %.3f" % self._beta)
         
     def process_until_done(self):
+        FRAME_MIN_MARGIN_IN = 0.0
         image_width = self._paper_width_pix - int(2.0 * FRAME_MIN_MARGIN_IN * self._printer_dpi)
         image_height = self._paper_height_pix - int(2.0 * FRAME_MIN_MARGIN_IN * self._printer_dpi)
         
@@ -355,7 +439,8 @@ class ZolaroidProcessor(object):
             adjusted = gray.copy()
             cv2.convertScaleAbs(gray, adjusted, alpha, beta)
             resized = cv2.resize(adjusted, (self._frame_width_pix, self._frame_height_pix))
-            blit_offset(img, resized, (self._frame_off_x_pix, self._frame_off_y_pix))
+            #blit_offset(img, resized, (self._frame_off_x_pix, self._frame_off_y_pix))
+            blit_offset(img, resized, (0,0))
             
             preview_img = cv2.resize(img, (image_width / 2, image_height / 2))
             
@@ -379,7 +464,6 @@ class ZolaroidProcessor(object):
         else:
             dithered = dither_ordered(self._result_image)
 
-        # TODO: Support ZPL
         if filename is None:
             output_file = tempfile.NamedTemporaryFile(delete=False)
             output_filename = output_file.name
@@ -387,8 +471,12 @@ class ZolaroidProcessor(object):
             output_file = open(filename, "wb+")
             output_filename = filename
 
+        # TODO: Support ZPL
         with output_file:
-            generate_epl_file(dithered, output_file, **kwargs)
+            if image_type == "epl":
+                generate_epl_file(dithered, output_file, **kwargs)
+            elif image_type == "escpos":
+                generate_escpos_file(dithered, output_file, **kwargs)
             print("Done saving result")
         
         if kwargs.get("printer") is not None:
@@ -396,7 +484,19 @@ class ZolaroidProcessor(object):
                 if sys.platform == "win32":
                     # On win32, use the COPY /B command to print directly to a raw port. Somehow,
                     # I could not make normal IO work (as the case below), which works under Linux
-                    os.system("COPY /B %s %s" % (output_filename, kwargs["printer"]))
+                    #os.system("COPY /B %s %s" % (output_filename, kwargs["printer"]))
+                    import serial
+                    p = serial.Serial(port=kwargs["printer"], baudrate=19200, dsrdtr=True)
+                    with open(output_filename, "rb") as infile:
+                        data = infile.read()
+                        sent = 0
+                        while len(data) > 0:
+                            to_send = min(1024, len(data))
+                            p.write(data[:to_send])
+                            sent += to_send
+                            data = data[to_send:]
+                            print("sent=%d" % sent)
+
                 else:
                     # On non-windows, simply dump the data to the printer spool path
                     with open(output_filename, "rb") as infile:
@@ -433,7 +533,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--printer', metavar="PATH_TO_PRINTER", action="store", help='Path for printer which will output')
     parser.add_argument('-o', '--output', metavar="FILENAME", action="store", help='Path where to save output file')
-    parser.add_argument('-t', '--type', metavar="FORMAT", action="store", default="epl", help='Printer type, one of ["zpl", "epl"]')
+    parser.add_argument('-t', '--type', metavar="FORMAT", action="store", default="epl", help='Printer type, one of ["zpl", "epl", "escpos"]')
     parser.add_argument('-l', '--list', action="store_true", help='List MIDI devices and exit')
     parser.add_argument('-n', '--midi-name', metavar="MIDI_NAME", action="store", help='Full name of MIDI input device or "default" for default')
     parser.add_argument('-N', '--midi-num', metavar="MIDI_NUM", action="store", type=int, help='Index of MIDI input device obtained from -l/--list')
@@ -472,6 +572,10 @@ def main():
     # Init MIDI driver    
     controller = Controller()
     midi_driver = None
+
+    if args.type not in ["epl", "escpos"]:
+        print("Image type %s not yet supported!" % (args.type), file=sys.stderr)
+        sys.exit(1)
 
     if MIDI_SUPPORT:
         midi_port = args.midi_name
@@ -517,6 +621,7 @@ def main():
     # Adjust
     processor = ZolaroidProcessor(source=captured, background="backgrounds/frame1.png",
                                   frame_off_x_in=FRAME_OFF_X_IN, frame_off_y_in=FRAME_OFF_Y_IN,
+                                  paper_width_in=args.width, paper_height_in=args.height,
                                   printer_dpi=args.dpi)
     controller.add_observer(processor)
     processor.process_until_done()
